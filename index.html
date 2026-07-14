@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPS Tracker - Enhanced</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; }
+        #map { height: 100vh; width: 100%; }
+        
+        .info-panel {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.88);
+            backdrop-filter: blur(10px);
+            color: white;
+            padding: 12px 16px;
+            border-radius: 12px;
+            z-index: 1000;
+            font-size: 13px;
+            max-width: 500px;
+            border-left: 4px solid #22c55e;
+        }
+        .info-panel.stationary { border-left-color: #3b82f6; }
+        .info-panel.moving { border-left-color: #eab308; }
+        .info-panel.vibration { border-left-color: #ef4444; }
+        
+        .status-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 1.5s infinite;
+        }
+        .status-dot.stationary { background: #3b82f6; animation: none; }
+        .status-dot.moving { background: #eab308; }
+        .status-dot.vibration { background: #ef4444; animation: pulse 0.3s infinite; }
+        
+        @keyframes pulse {
+            0% { opacity: 0.5; transform: scale(1); }
+            100% { opacity: 1; transform: scale(1.2); }
+        }
+        
+        .info-row { margin-top: 6px; display: flex; justify-content: space-between; font-size: 11px; opacity: 0.8; flex-wrap: wrap; gap: 4px; }
+        
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+        }
+        .badge.ukf { background: #3b82f6; color: white; }
+        .badge.stationary { background: #22c55e; color: white; }
+        .badge.moving { background: #eab308; color: black; }
+        .badge.vibration { background: #ef4444; color: white; animation: blink 0.5s infinite; }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .confidence-bar {
+            width: 100%;
+            height: 4px;
+            background: #333;
+            border-radius: 2px;
+            margin-top: 6px;
+            overflow: hidden;
+        }
+        .confidence-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+        
+        .vibration-meter {
+            width: 100%;
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            margin-top: 4px;
+            overflow: hidden;
+            position: relative;
+        }
+        .vibration-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+        .vibration-label {
+            font-size: 9px;
+            opacity: 0.6;
+            display: flex;
+            justify-content: space-between;
+            margin-top: 2px;
+        }
+        
+        .controls {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .btn {
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(5px);
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .btn:hover { background: rgba(0,0,0,0.9); transform: scale(1.05); }
+        .btn.danger { background: rgba(220,38,38,0.8); }
+        .btn.danger:hover { background: rgba(220,38,38,1); }
+        
+        .legend {
+            position: fixed;
+            bottom: 150px;
+            right: 20px;
+            z-index: 1000;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 8px;
+            color: white;
+            font-size: 11px;
+        }
+        .legend-item { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+        .legend-color { width: 20px; height: 3px; border-radius: 2px; }
+        
+        .toast {
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            z-index: 2000;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.5s ease;
+            pointer-events: none;
+        }
+        .toast.show { opacity: 1; }
+        .toast.success { border-left: 4px solid #22c55e; }
+        .toast.error { border-left: 4px solid #ef4444; }
+        
+        @media (min-width: 768px) {
+            .info-panel { bottom: 20px; left: 20px; right: auto; min-width: 440px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div class="controls">
+        <button class="btn" onclick="centerMap()">🎯 Theo dõi</button>
+        <button class="btn danger" onclick="clearAllData()">🗑️ Xóa dữ liệu</button>
+        <button class="btn" onclick="refreshData()">🔄 Làm mới</button>
+    </div>
+    
+    <div class="legend">
+        <div class="legend-item"><div class="legend-color" style="background:#22c55e;"></div><span>Vị trí UKF</span></div>
+        <div class="legend-item"><div class="legend-color" style="background:#ef4444;"></div><span>GPS thô</span></div>
+        <div class="legend-item"><div class="legend-color" style="background:#3b82f6;"></div><span>Filtered</span></div>
+        <div class="legend-item"><div class="legend-color" style="background:#eab308;"></div><span>Đường đi</span></div>
+        <div class="legend-item"><div class="legend-color" style="background:#ef4444;height:8px;width:8px;border-radius:50%;"></div><span>⚠ Rung động</span></div>
+    </div>
+    
+    <div class="info-panel" id="infoPanel">
+        <div>
+            <span class="status-dot" id="statusDot"></span>
+            <strong>GPS TRACKER</strong>
+            <span class="badge ukf">UKF</span>
+            <span class="badge" id="stateBadge">--</span>
+            <span style="float:right; font-size:11px;" id="updateTime">--</span>
+        </div>
+        <div id="coord-display" style="margin-top:8px;">📍 Đang chờ dữ liệu...</div>
+        
+        <div class="info-row">
+            <span id="accelDisplay">📊 Accel: --,--,-- m/s²</span>
+            <span id="vibrationDisplay">📳 Rung: -- m/s²</span>
+        </div>
+        <div class="vibration-meter">
+            <div class="vibration-fill" id="vibrationFill" style="width:0%;"></div>
+        </div>
+        <div class="vibration-label">
+            <span>0 m/s²</span>
+            <span id="vibrationStatus">✅ Ổn định</span>
+            <span id="maxVibrationDisplay">Max: --</span>
+        </div>
+        
+        <div class="info-row">
+            <span id="confidenceDisplay">🎯 Độ tin cậy: --%</span>
+            <span id="recordCount">📊 Records: --</span>
+        </div>
+        <div class="confidence-bar">
+            <div class="confidence-fill" id="confidenceFill" style="width:0%;"></div>
+        </div>
+        <div class="info-row" style="font-size:10px; opacity:0.6;">
+            <span id="filterInfo">Filter: UKF Enhanced</span>
+            <span id="extraInfo">🛰️ Sats: --</span>
+        </div>
+    </div>
+    
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // === MAP ===
+        var map = L.map('map').setView([21.0285, 105.8542], 13);
+        
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+            subdomains: 'abcd',
+            maxZoom: 19
+        }).addTo(map);
+        
+        // === VARIABLES ===
+        var finalMarker = null, rawMarker = null, filteredMarker = null;
+        var pathLine = null, pathPoints = [];
+        var autoFollow = true, currentLocation = null;
+        var socket = null, isConnected = false;
+        var recordCount = 0;
+        var isStationary = false;
+        var vibration = 0;
+        var maxVibration = 0;
+        
+        // === ICONS ===
+        var finalIcon = L.divIcon({
+            html: '<div style="background:#22c55e;width:14px;height:14px;border-radius:50%;border:2px solid white;box-shadow:0 0 15px rgba(34,197,94,0.6);"></div>',
+            iconSize: [14, 14]
+        });
+        
+        var stationaryIcon = L.divIcon({
+            html: '<div style="background:#3b82f6;width:12px;height:12px;border-radius:50%;border:2px solid white;box-shadow:0 0 10px rgba(59,130,246,0.5);"></div>',
+            iconSize: [12, 12]
+        });
+        
+        var vibrationIcon = L.divIcon({
+            html: '<div style="background:#ef4444;width:14px;height:14px;border-radius:50%;border:2px solid white;box-shadow:0 0 20px rgba(239,68,68,0.7);animation:pulse 0.3s infinite;"></div>',
+            iconSize: [14, 14]
+        });
+        
+        var rawIcon = L.divIcon({
+            html: '<div style="background:#ef4444;width:10px;height:10px;border-radius:50%;border:2px solid white;opacity:0.7;"></div>',
+            iconSize: [10, 10]
+        });
+        
+        var filteredIcon = L.divIcon({
+            html: '<div style="background:#3b82f6;width:10px;height:10px;border-radius:50%;border:2px solid white;opacity:0.7;"></div>',
+            iconSize: [10, 10]
+        });
+        
+        // === TOAST ===
+        function showToast(message, type = 'success') {
+            var toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast ' + type + ' show';
+            setTimeout(function() { toast.classList.remove('show'); }, 3000);
+        }
+        
+        // === SOCKETIO ===
+        function connectSocket() {
+            socket = io({
+                reconnection: true,
+                reconnectionAttempts: 0,
+                reconnectionDelay: 1000
+            });
+            
+            socket.on('connect', function() {
+                console.log('✅ Socket connected');
+                isConnected = true;
+                showToast('🔌 Kết nối thành công', 'success');
+            });
+            
+            socket.on('disconnect', function() {
+                console.log('❌ Socket disconnected');
+                isConnected = false;
+                showToast('⚠️ Mất kết nối', 'error');
+            });
+            
+            socket.on('filtered_update', function(data) {
+                console.log('📍 Filtered update:', data);
+                if (data && data.lat && data.lng) {
+                    updateMap(data);
+                }
+            });
+            
+            socket.on('raw_update', function(data) {
+                if (data && data.lat && data.lng) {
+                    var rawLatLng = [data.lat, data.lng];
+                    if (rawMarker === null) {
+                        rawMarker = L.marker(rawLatLng, { icon: rawIcon }).addTo(map);
+                    } else {
+                        rawMarker.setLatLng(rawLatLng);
+                    }
+                    if (data.accel_x !== undefined) {
+                        document.getElementById('accelDisplay').innerHTML = 
+                            `📊 Accel: ${data.accel_x.toFixed(2)}, ${data.accel_y.toFixed(2)}, ${data.accel_z.toFixed(2)} m/s²`;
+                    }
+                }
+            });
+            
+            socket.on('data_cleared', function() {
+                showToast('🗑️ Đã xóa dữ liệu', 'success');
+                clearPathFromMap();
+                fetchStatus();
+            });
+        }
+        
+        // === MAP FUNCTIONS ===
+        function updateMap(data) {
+            if (!data || !data.lat || !data.lng) return;
+            
+            var finalLatLng = [data.lat, data.lng];
+            currentLocation = finalLatLng;
+            
+            isStationary = data.is_stationary || false;
+            vibration = data.vibration || 0;
+            maxVibration = data.max_vibration || 0;
+            
+            var icon;
+            if (vibration > 1.5) {
+                icon = vibrationIcon;
+            } else if (isStationary) {
+                icon = stationaryIcon;
+            } else {
+                icon = finalIcon;
+            }
+            
+            if (finalMarker === null) {
+                finalMarker = L.marker(finalLatLng, { icon: icon }).addTo(map);
+            } else {
+                finalMarker.setLatLng(finalLatLng);
+                finalMarker.setIcon(icon);
+            }
+            
+            if (data.filtered_lat && data.filtered_lng) {
+                var filteredLatLng = [data.filtered_lat, data.filtered_lng];
+                if (filteredMarker === null) {
+                    filteredMarker = L.marker(filteredLatLng, { icon: filteredIcon }).addTo(map);
+                } else {
+                    filteredMarker.setLatLng(filteredLatLng);
+                }
+            }
+            
+            pathPoints.push(finalLatLng);
+            if (pathPoints.length > 500) pathPoints.shift();
+            updatePathLine();
+            
+            if (autoFollow) map.setView(finalLatLng, map.getZoom());
+            
+            updateUI(data);
+        }
+        
+        function updatePathLine() {
+            if (pathLine !== null) {
+                map.removeLayer(pathLine);
+                pathLine = null;
+            }
+            if (pathPoints.length > 1) {
+                var color = vibration > 1.5 ? '#ef4444' : (isStationary ? '#3b82f6' : '#eab308');
+                pathLine = L.polyline(pathPoints, {
+                    color: color,
+                    weight: vibration > 1.5 ? 4 : 3,
+                    opacity: 0.7,
+                    lineJoin: 'round'
+                }).addTo(map);
+            }
+        }
+        
+        function clearPathFromMap() {
+            pathPoints = [];
+            if (pathLine !== null) {
+                map.removeLayer(pathLine);
+                pathLine = null;
+            }
+            if (finalMarker !== null) {
+                map.removeLayer(finalMarker);
+                finalMarker = null;
+            }
+            if (rawMarker !== null) {
+                map.removeLayer(rawMarker);
+                rawMarker = null;
+            }
+            if (filteredMarker !== null) {
+                map.removeLayer(filteredMarker);
+                filteredMarker = null;
+            }
+            currentLocation = null;
+            document.getElementById('coord-display').innerHTML = '📍 Đang chờ dữ liệu...';
+            document.getElementById('updateTime').textContent = '--';
+            document.getElementById('confidenceFill').style.width = '0%';
+            document.getElementById('vibrationFill').style.width = '0%';
+        }
+        
+        function updateUI(data) {
+            var confidence = data.confidence || 0.5;
+            var confidencePercent = (confidence * 100).toFixed(1);
+            var isStationary = data.is_stationary || false;
+            var vibration = data.vibration || 0;
+            var maxVibration = data.max_vibration || 0;
+            var sats = data.sats || 0;
+            
+            document.getElementById('coord-display').innerHTML = 
+                `📍 ${data.lat.toFixed(7)}, ${data.lng.toFixed(7)}`;
+            document.getElementById('updateTime').textContent = 
+                `🕐 ${data.timestamp || '--'}`;
+            document.getElementById('confidenceDisplay').textContent = 
+                `🎯 Độ tin cậy: ${confidencePercent}%`;
+            
+            // Confidence bar color
+            var confFill = document.getElementById('confidenceFill');
+            confFill.style.width = `${confidencePercent}%`;
+            if (confidence >= 0.7) {
+                confFill.style.background = 'linear-gradient(90deg, #22c55e, #22c55e)';
+            } else if (confidence >= 0.4) {
+                confFill.style.background = 'linear-gradient(90deg, #eab308, #22c55e)';
+            } else {
+                confFill.style.background = 'linear-gradient(90deg, #ef4444, #eab308)';
+            }
+            
+            document.getElementById('filterInfo').innerHTML = 
+                `Filter: ${data.filter_type || 'UKF Enhanced'} | Uncertainty: ${(data.uncertainty || 0).toFixed(2)}m`;
+            document.getElementById('extraInfo').innerHTML = 
+                `🛰️ Sats: ${sats}`;
+            
+            // Vibration
+            var vibPercent = Math.min((vibration / 3) * 100, 100);
+            var vibFill = document.getElementById('vibrationFill');
+            vibFill.style.width = `${vibPercent}%`;
+            if (vibration > 1.5) {
+                vibFill.style.background = '#ef4444';
+            } else if (vibration > 0.3) {
+                vibFill.style.background = '#eab308';
+            } else {
+                vibFill.style.background = '#22c55e';
+            }
+            
+            document.getElementById('vibrationDisplay').innerHTML = 
+                `📳 Rung: ${vibration.toFixed(3)} m/s²`;
+            document.getElementById('maxVibrationDisplay').innerHTML = 
+                `Max: ${maxVibration.toFixed(3)} m/s²`;
+            
+            var vibStatus = document.getElementById('vibrationStatus');
+            if (vibration > 1.5) {
+                vibStatus.innerHTML = '🔴 RUNG MẠNH!';
+                vibStatus.style.color = '#ef4444';
+            } else if (vibration > 0.3) {
+                vibStatus.innerHTML = '🟡 Rung nhẹ';
+                vibStatus.style.color = '#eab308';
+            } else {
+                vibStatus.innerHTML = '✅ Ổn định';
+                vibStatus.style.color = '#22c55e';
+            }
+            
+            // State badge
+            var badge = document.getElementById('stateBadge');
+            var dot = document.getElementById('statusDot');
+            var panel = document.getElementById('infoPanel');
+            
+            if (vibration > 1.5) {
+                badge.className = 'badge vibration';
+                badge.textContent = '🔴 RUNG!';
+                dot.className = 'status-dot vibration';
+                panel.className = 'info-panel vibration';
+            } else if (isStationary) {
+                badge.className = 'badge stationary';
+                badge.textContent = '⏸ Đứng yên';
+                dot.className = 'status-dot stationary';
+                panel.className = 'info-panel stationary';
+            } else {
+                badge.className = 'badge moving';
+                badge.textContent = '▶ Di chuyển';
+                dot.className = 'status-dot moving';
+                panel.className = 'info-panel moving';
+            }
+        }
+        
+        // === CLEAR DATA ===
+        function clearAllData() {
+            if (!confirm('🗑️ XÓA TOÀN BỘ DỮ LIỆU?')) return;
+            
+            showToast('🔄 Đang xóa...', 'success');
+            
+            fetch('/api/clear', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.message === 'Cleared') {
+                        clearPathFromMap();
+                        document.getElementById('recordCount').textContent = '📊 Records: 0';
+                        showToast('✅ Đã xóa dữ liệu!', 'success');
+                    } else {
+                        showToast('❌ Lỗi: ' + (data.error || 'Không xác định'), 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Clear error:', error);
+                    showToast('❌ Lỗi kết nối server', 'error');
+                });
+        }
+        
+        // === FETCH ===
+        function fetchStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.raw_count !== undefined) {
+                        recordCount = data.raw_count;
+                        document.getElementById('recordCount').textContent = 
+                            `📊 Records: ${data.raw_count}`;
+                    }
+                })
+                .catch(error => console.error('Status error:', error));
+        }
+        
+        function refreshData() {
+            showToast('🔄 Đang làm mới...', 'success');
+            fetchHistory();
+            fetchStatus();
+            setTimeout(() => showToast('✅ Đã làm mới', 'success'), 1000);
+        }
+        
+        function fetchHistory() {
+            fetch('/api/history')
+                .then(response => response.json())
+                .then(history => {
+                    if (history && history.length > 0) {
+                        pathPoints = history.map(p => {
+                            var lat = p.final_lat || p.lat || 0;
+                            var lng = p.final_lng || p.lng || 0;
+                            return [lat, lng];
+                        });
+                        updatePathLine();
+                        
+                        var lastPoint = pathPoints[pathPoints.length - 1];
+                        if (lastPoint) {
+                            map.setView(lastPoint, 15);
+                            if (finalMarker === null) {
+                                finalMarker = L.marker(lastPoint, { icon: finalIcon }).addTo(map);
+                            } else {
+                                finalMarker.setLatLng(lastPoint);
+                            }
+                        }
+                    }
+                })
+                .catch(error => console.error('History error:', error));
+        }
+        
+        // === CONTROLS ===
+        function centerMap() {
+            if (currentLocation) {
+                map.setView(currentLocation, 16);
+                autoFollow = true;
+            } else {
+                showToast('⚠️ Chưa có vị trí GPS', 'error');
+            }
+        }
+        
+        // === INIT ===
+        connectSocket();
+        fetchHistory();
+        fetchStatus();
+        setInterval(fetchStatus, 30000);
+        
+        map.on('dragstart', function() { autoFollow = false; });
+        map.on('zoomstart', function() { autoFollow = false; });
+        
+        window.centerMap = centerMap;
+        window.clearAllData = clearAllData;
+        window.refreshData = refreshData;
+    </script>
+</body>
+</html>
